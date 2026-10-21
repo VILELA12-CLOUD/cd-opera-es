@@ -13,22 +13,21 @@ PRECO_PADRAO_PACOTE = 1.80
 # --- CONEXÃO COM GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+
 # --- FUNÇÕES DE LEITURA E ESCRITA NO GOOGLE SHEETS ---
 def ler_tabela(nome_aba):
   try:
     df = conn.read(worksheet=nome_aba, ttl=0)
-# --- FUNÇÕES DE LEITURA E ESCRITA NO GOOGLE SHEETS ---
-def ler_tabela(nome_aba):
-    try:
-        df = conn.read(worksheet=nome_aba, ttl=0)
-        if df is not None and not df.empty:
-            return df.dropna(how="all")
-        return pd.DataFrame()
-    except Exception as e:
-        st.warning(f"Aba '{nome_aba}' ainda sem dados ou em inicialização.")
-        return pd.DataFrame()  
+    if df is not None and not df.empty:
+      return df.dropna(how="all")
+    return pd.DataFrame()
+  except Exception as e:
+    st.warning(f"Aba '{nome_aba}' em inicialização ou sem dados.")
+    return pd.DataFrame()
 
 
+def salvar_tabela(nome_aba, df):
+  try:
     df_para_salvar = df.copy()
     for col in df_para_salvar.columns:
       df_para_salvar[col] = df_para_salvar[col].astype(str)
@@ -300,7 +299,7 @@ with aba_lancamento:
     m3.metric("🛵 Motoboys Ativos Hoje", len(df_agrupado))
 
     st.write("##### Resumo Acumulado por Motoboy")
-    st.dataframe(df_agrupado, use_container_width=True)
+    st.dataframe(df_agrupado, width="stretch")
 
     with st.expander(
         "🔍 Histórico detalhado / Excluir rota lançada incorretamente"
@@ -345,7 +344,7 @@ with aba_cadastro:
 
   st.divider()
   st.subheader("Motoboys Cadastrados")
-  st.dataframe(obter_motoboys(apenas_ativos=False), use_container_width=True)
+  st.dataframe(obter_motoboys(apenas_ativos=False), width="stretch")
 
 # -------------------------------------------------------------
 # ABA 3: PROGRESSO & COMPARATIVOS
@@ -415,7 +414,7 @@ with aba_fechamento:
       )
       df_fechamento.columns = ["Motoboy", "Total Pacotes", "Total A Pagar (R$)"]
 
-      st.dataframe(df_fechamento, use_container_width=True)
+      st.dataframe(df_fechamento, width="stretch")
       csv = df_fechamento.to_csv(index=False).encode("utf-8")
       st.download_button(
           "📥 Baixar Relatório em CSV/Excel",
