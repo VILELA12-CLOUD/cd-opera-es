@@ -17,17 +17,21 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # --- FUNÇÕES DE LEITURA E ESCRITA NO GOOGLE SHEETS ---
 def ler_tabela(nome_aba):
   try:
-    df = conn.read(worksheet=nome_aba, ttl=5)
+    df = conn.read(worksheet=nome_aba, ttl=0)
     return df.dropna(how="all")
   except Exception:
     return pd.DataFrame()
 
 
 def salvar_tabela(nome_aba, df):
-    try:
-        conn.update(worksheet=nome_aba, data=df)
-    except Exception:
-        conn.create(worksheet=nome_aba, data=df)
+  try:
+    conn.update(worksheet=nome_aba, data=df)
+    st.cache_data.clear()
+  except Exception as e:
+    st.error(
+        f"Erro ao salvar na planilha: {e}. Verifique as permissões de Editor no"
+        " Google Sheets."
+    )
 
 # --- CARREGAR DADOS ---
 df_motoboys = ler_tabela("motoboys")
