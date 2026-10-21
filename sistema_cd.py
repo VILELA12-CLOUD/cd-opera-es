@@ -126,7 +126,6 @@ def adicionar_rota(
       else round(valor_calc, 2)
   )
 
-  # Ajuste do Fuso Horário para Brasília (SP) usando zoneinfo
   hora_atual = datetime.now(FUSO_SP).strftime("%H:%M:%S")
 
   nova_rota = pd.DataFrame([{
@@ -326,7 +325,137 @@ with aba_lancamento:
         c1, c2, c3, c4, c5 = st.columns([0.25, 0.15, 0.2, 0.2, 0.2])
         c1.write(f"**{row['nome']}**")
         c2.write(f"🕒 {row.get('hora', '--:--')}")
-        insuc_txt = (
-            f" (Insucessos: {row['qtd_insucesso']})"
-            if row["qtd_insucesso"] > 0
-            else
+        
+        # Corrigido sem parênteses quebrados
+        insuc_qtd = row["qtd_insucesso"]
+        insuc_txt = f" (Insucessos: {insuc_qtd})" if insuc_qtd > 0 else ""
+        
+        c3.write(f"📦 {int(row['qtd_pacotes'])} pct(s){insuc_txt}")
+        c4.write(f"💰 R$ {row['valor_final']:.2f}")
+        if c5.button("🗑️ Excluir", key=f"del_rota_{row['id']}"):
+          if deletar_rota(row["id"]):
+            st.toast("🗑️ Rota excluída!")
+            st.rerun()
+        st.write("---")
+  else:
+    st.info("Nenhum lançamento efetuado para a data selecionada.")
+
+# -------------------------------------------------------------
+# ABA 2: CADASTRO DE MOTOBOYS
+# -------------------------------------------------------------
+with aba_cadastro:
+  st.subheader("Novo Cadastro")
+  with st.form("form_motoboy", clear_on_submit=True):
+    col1, col2 = st.columns(2)
+    with col1:
+      nome = st.text_input("Nome Completo*")
+      email = st.text_input("E-mail")
+      telefone = st.text_input("Telefone / WhatsApp")
+    with col2:
+      cnh = st.text_input("Número da CNH")
+      placa = st.text_input("Placa da Moto")
+
+    salvar = st.form_submit_button("Cadastrar Motoboy")
+    if salvar:
+      if nome.strip():
+        if salvar_motoboy(nome, email, telefone, cnh, placa):
+          st.toast(f"✅ Motoboy {nome} cadastrado com sucesso!")
+          st.rerun()
+      else:
+        st.error("O campo Nome é obrigatório.")
+
+  st.divider()
+  st.subheader("Motoboys Cadastrados")
+  st.dataframe(obter_motoboys(apenas_ativos=False), width="stretch")
+
+# -------------------------------------------------------------
+# ABA 3: PROGRESSO & COMPARATIVOS
+# -------------------------------------------------------------
+with aba_progresso:
+  st.subheader("📈 Análise de Desempenho e Comparativos")
+  df_lancamentos_geral = ler_tabela("lancamentos")
+  df_motoboys_geral = ler_tabela("motoboys")
+
+  if not df_lancamentos_geral.empty and not df_motoboys_geral.empty:
+    try:
+      df_g = df_lancamentos_geral.merge(
+          df_motoboys_geral, left_on="motoboy_id", right_on="id"
+      )
+      df_g["qtd_pacotes"] = pd.to_numeric(
+          df_g["qtd_pacotes"], errors="coerce"
+      )
+      df_g["data_formatada"] = pd.to_datetime(df_g["data"]).dt.strftime(
+          "%d/%m/%Y"
+      )
+
+      df_geral = (
+          df_g.groupby(["data_formatada", "nome"])["qtd_pacotes"]
+          .sum()
+          .reset_index()
+      )
+      df_geral.columns = ["Data", "Motoboy", "Pacotes"]
+
+      st.bar_chart(df_geral, x="Data", y="Pacotes", color="Motoboy")
+    except Exception:
+      st.info("Aguardando lançamentos para compor gráficos.")
+  else:
+    st.info("Ainda não há dados suficientes para gerar gráficos.")
+
+# -------------------------------------------------------------
+# ABA 4: FECHAMENTO DO MÊS
+# -------------------------------------------------------------
+with aba_fechamento:
+  st.subheader("🗓️ Fechamento Mensal para Pagamento")
+  col_mes, col_ano = st.columns(2)
+  with col_mes:
+    mes = st.selectbox(
+        "Mês", list(range(1, 13)), index=datetime.now(FUSO_SP).month - 1
+    )
+  with col_ano:
+    ano = st.number_input(
+        "Ano", min_value=2024, value=datetime.now(FUSO_SP).year
+    )
+
+  prefixo_data = f"{ano}-{mes:02d}"
+
+  df_lancamentos_geral = ler_tabela("lancamentos")
+  df_motoboys_geral = ler_tabela("motoboys")
+
+  if not df_lancamentos_geral.empty and not df_motoboys_geral.empty:
+    df_mes = df_lancamentos_geral[
+        df_lancamentos_geral["data"].astype(str).str.startswith(prefixo_data)
+    ]
+    if not df_mes.empty:
+      df_f = df_mes.merge(
+          df_motoboys_geral, left_on="motoboy_id", right_on="id"
+      )
+      df_f["qtd_pacotes"] = pd.to_numeric(
+          df_f["qtd_pacotes"], errors="coerce"
+      )
+      df_f["valor_final"] = pd.to_numeric(
+          df_f["valor_final"], errors="coerce"
+      )
+
+      df_fechamento = (
+          df_f.groupby("nome")
+          .agg(
+              Total_Pacotes=("qtd_pacotes", "sum"),
+              Total_A_Pagar=("valor_final", "sum"),
+          )
+          .reset_index()
+      )
+      df_fechamento["Total_A_Pagar"] = df_fechamento["Total_A_Pagar"].round(2)
+      df_fechamento.columns = ["Motoboy", "Total Pacotes", "Total A Pagar (R$)"]
+
+      st.dataframe(df_fechamento, width="stretch")
+      csv = df_fechamento.to_csv(index=False).encode("utf-8")
+      st.download_button(
+          "📥 Baixar Relatório em CSV/Excel",
+          csv,
+          f"fechamento_{prefixo_data}.csv",
+          "text/csv",
+      )
+    else:
+      st.info(f"Sem dados registrados para o mês {mes:02d}/{ano}.")
+  else:
+    st.info(f"Sem dados registrados para o mês {mes:02d}/{ano}.")
