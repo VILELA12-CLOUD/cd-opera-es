@@ -14,10 +14,11 @@ PRECO_PADRAO_PACOTE = 1.80
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 
-# --- FUNÇÕES DE LEITURA E ESCRITA NO GOOGLE SHEETS ---
+# --- FUNÇÕES DE LEITURA E ESCRITA COM CACHE PARA EVITAR ERRO 429 ---
 def ler_tabela(nome_aba):
   try:
-    df = conn.read(worksheet=nome_aba, ttl=0)
+    # ttl=5 mantém os dados atualizados a cada 5 segundos sem estourar o limite de 60 requisições/min do Google
+    df = conn.read(worksheet=nome_aba, ttl=5)
     if df is not None and not df.empty:
       return df.dropna(how="all")
     return pd.DataFrame()
@@ -46,7 +47,6 @@ def obter_motoboys(apenas_ativos=True):
     return pd.DataFrame()
 
   if apenas_ativos and "ativo" in df_m.columns:
-    # Garante a leitura de qualquer formato do campo 'ativo' (1, '1', 1.0, '1.0', True, 'True')
     df_m["ativo_clean"] = (
         df_m["ativo"].astype(str).str.strip().str.replace(".0", "", regex=False)
     )
@@ -82,8 +82,7 @@ def salvar_motoboy(nome, email, telefone, cnh, placa):
   return salvar_tabela("motoboys", df_atualizado)
 
 
-def obter_totais_dia_motoboy(motoboy_id, data_str):
-  df_l = ler_tabela("lancamentos")
+def obter_totais_dia_motoboy(df_l, motoboy_id, data_str):
   if df_l.empty or "motoboy_id" not in df_l.columns:
     return 0, 0.0, 0
 
@@ -151,6 +150,10 @@ aba_lancamento, aba_cadastro, aba_progresso, aba_fechamento = st.tabs([
     "📅 Fechamento do Mês",
 ])
 
+# Carregamento centralizado dos dados
+df_lancamentos_geral = ler_tabela("lancamentos")
+df_motoboys_geral = ler_tabela("motoboys")
+
 # -------------------------------------------------------------
 # ABA 1: LANÇAMENTO DO DIA
 # -------------------------------------------------------------
@@ -173,8 +176,8 @@ with aba_lancamento:
     )
     motoboy_id = df_m[df_m["nome"] == motoboy_selecionado]["id"].values[0]
 
-    pacotes_acumulados, valor_acumulado, total_rotas = obter_totais_dia_motoboy(
-        motoboy_id, data_str
+    pacotes_acumulados, valor_acumulado, total_rotas = (
+        obter_totais_dia_motoboy(df_lancamentos_geral, motoboy_id, data_str)
     )
 
     if total_rotas > 0:
@@ -229,17 +232,19 @@ with aba_lancamento:
   st.divider()
   st.subheader(f"📋 Resumo Geral do Dia: {data_br}")
 
-  df_lancamentos = ler_tabela("lancamentos")
-  df_motoboys_todos = ler_tabela("motoboys")
-
-  if not df_lancamentos.empty and "data" in df_lancamentos.columns:
-    df_dia = df_lancamentos[df_lancamentos["data"].astype(str) == data_str]
+  if (
+      not df_lancamentos_geral.empty
+      and "data" in df_lancamentos_geral.columns
+  ):
+    df_dia = df_lancamentos_geral[
+        df_lancamentos_geral["data"].astype(str) == data_str
+    ]
   else:
     df_dia = pd.DataFrame()
 
-  if not df_dia.empty and not df_motoboys_todos.empty:
+  if not df_dia.empty and not df_motoboys_geral.empty:
     df_merged = df_dia.merge(
-        df_motoboys_todos,
+        df_motoboys_geral,
         left_on="motoboy_id",
         right_on="id",
         suffixes=("", "_mb"),
@@ -336,13 +341,10 @@ with aba_cadastro:
 # -------------------------------------------------------------
 with aba_progresso:
   st.subheader("📈 Análise de Desempenho e Comparativos")
-  df_lancamentos = ler_tabela("lancamentos")
-  df_motoboys_todos = ler_tabela("motoboys")
-
-  if not df_lancamentos.empty and not df_motoboys_todos.empty:
+  if not df_lancamentos_geral.empty and not df_motoboys_geral.empty:
     try:
-      df_g = df_lancamentos.merge(
-          df_motoboys_todos, left_on="motoboy_id", right_on="id"
+      df_g = df_lancamentos_geral.merge(
+          df_motoboys_geral, left_on="motoboy_id", right_on="id"
       )
       df_g["qtd_pacotes"] = pd.to_numeric(
           df_g["qtd_pacotes"], errors="coerce"
@@ -379,16 +381,13 @@ with aba_fechamento:
 
   prefixo_data = f"{ano}-{mes:02d}"
 
-  df_lancamentos = ler_tabela("lancamentos")
-  df_motoboys_todos = ler_tabela("motoboys")
-
-  if not df_lancamentos.empty and not df_motoboys_todos.empty:
-    df_mes = df_lancamentos[
-        df_lancamentos["data"].astype(str).str.startswith(prefixo_data)
+  if not df_lancamentos_geral.empty and not df_motoboys_geral.empty:
+    df_mes = df_lancamentos_geral[
+        df_lancamentos_geral["data"].astype(str).str.startswith(prefixo_data)
     ]
     if not df_mes.empty:
       df_f = df_mes.merge(
-          df_motoboys_todos, left_on="motoboy_id", right_on="id"
+          df_motoboys_geral, left_on="motoboy_id", right_on="id"
       )
       df_f["qtd_pacotes"] = pd.to_numeric(
           df_f["qtd_pacotes"], errors="coerce"
