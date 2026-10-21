@@ -1,5 +1,6 @@
 from datetime import datetime
 import pandas as pd
+import pytz
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 
@@ -9,6 +10,7 @@ st.set_page_config(
 )
 
 PRECO_PADRAO_PACOTE = 1.80
+FUSO_SP = pytz.timezone("America/Sao_Paulo")
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -98,11 +100,16 @@ def obter_totais_dia_motoboy(df_l, motoboy_id, data_str):
   )
   total_rotas = len(df_filtrado)
 
-  return total_pacotes, total_valor, total_rotas
+  return total_pacotes, round(total_valor, 2), total_rotas
 
 
 def adicionar_rota(
-    motoboy_id, data_str, qtd_pacotes_nova_rota, valor_final_nova_rota, obs=""
+    motoboy_id,
+    data_str,
+    qtd_pacotes,
+    qtd_insucesso,
+    valor_final_manual,
+    obs="",
 ):
   df_l = ler_tabela("lancamentos")
   novo_id = (
@@ -110,16 +117,27 @@ def adicionar_rota(
       if df_l.empty or "id" not in df_l.columns
       else int(pd.to_numeric(df_l["id"], errors="coerce").max()) + 1
   )
-  valor_calc = qtd_pacotes_nova_rota * PRECO_PADRAO_PACOTE
-  hora_atual = datetime.now().strftime("%H:%M:%S")
+
+  # Cálculo exato com desconto dos insucessos
+  pacotes_entregues = max(0, qtd_pacotes - qtd_insucesso)
+  valor_calc = round(pacotes_entregues * PRECO_PADRAO_PACOTE, 2)
+  valor_final = (
+      round(valor_final_manual, 2)
+      if valor_final_manual > 0
+      else round(valor_calc, 2)
+  )
+
+  # Ajuste do Fuso Horário para Brasília (SP)
+  hora_atual = datetime.now(FUSO_SP).strftime("%H:%M:%S")
 
   nova_rota = pd.DataFrame([{
       "id": str(novo_id),
       "motoboy_id": str(motoboy_id),
       "data": str(data_str),
-      "qtd_pacotes": str(qtd_pacotes_nova_rota),
-      "valor_calculado": str(valor_calc),
-      "valor_final": str(valor_final_nova_rota),
+      "qtd_pacotes": str(int(qtd_pacotes)),
+      "qtd_insucesso": str(int(qtd_insucesso)),
+      "valor_calculado": str(round(valor_calc, 2)),
+      "valor_final": str(round(valor_final, 2)),
       "observacao": str(obs),
       "hora": str(hora_atual),
   }])
@@ -151,7 +169,9 @@ aba_lancamento, aba_cadastro, aba_progresso, aba_fechamento = st.tabs([
 # -------------------------------------------------------------
 with aba_lancamento:
   st.subheader("Registro de Pacotes por Rota")
-  data_hoje = st.date_input("Data da Operação", datetime.now().date())
+  data_hoje = st.date_input(
+      "Data da Operação", datetime.now(FUSO_SP).date()
+  )
   data_str = str(data_hoje)
   data_br = data_hoje.strftime("%d/%m/%Y")
 
@@ -183,21 +203,27 @@ with aba_lancamento:
     st.write("---")
     st.write("#### ➕ Adicionar Nova Rota / Saída")
 
-    # USO DE FORMULÁRIO PARA EVITAR RECARRAGAMENTO PREMATURO
     with st.form("form_rota", clear_on_submit=True):
-      col1, col2, col3 = st.columns(3)
-      with col1:
+      c1, c2, c3, c4 = st.columns(4)
+      with c1:
         qtd_nova_rota = st.number_input(
-            "Pacotes DESTA Rota", min_value=1, value=1, step=1
+            "Pacotes Saída", min_value=1, value=1, step=1
         )
-      with col2:
-        valor_calc_rota = qtd_nova_rota * PRECO_PADRAO_PACOTE
-        st.metric("Valor da Rota (R$ 1,80/pct)", f"R$ {valor_calc_rota:.2f}")
-      with col3:
+      with c2:
+        qtd_insucesso = st.number_input(
+            "Insucessos / Retorno", min_value=0, value=0, step=1
+        )
+      with c3:
+        pacotes_liquidos = max(0, qtd_nova_rota - qtd_insucesso)
+        val_sugerido = round(pacotes_liquidos * PRECO_PADRAO_PACOTE, 2)
+        st.metric(
+            f"Entregues ({pacotes_liquidos} pct)", f"R$ {val_sugerido:.2f}"
+        )
+      with c4:
         valor_final_rota = st.number_input(
-            "Valor Final da Rota (Editável)",
+            "Valor Final (Editável)",
             min_value=0.0,
-            value=float(valor_calc_rota),
+            value=float(val_sugerido),
             format="%.2f",
         )
 
@@ -208,7 +234,12 @@ with aba_lancamento:
 
       if btn_salvar_rota:
         if adicionar_rota(
-            motoboy_id, data_str, qtd_nova_rota, valor_final_rota, obs
+            motoboy_id,
+            data_str,
+            qtd_nova_rota,
+            qtd_insucesso,
+            valor_final_rota,
+            obs,
         ):
           st.toast("✅ Rota adicionada com sucesso!")
           st.rerun()
@@ -235,14 +266,25 @@ with aba_lancamento:
         right_on="id",
         suffixes=("", "_mb"),
     )
+
+    # Tratamento rigoroso de números para evitar dízima/concatenação de string
     df_merged["qtd_pacotes"] = pd.to_numeric(
         df_merged["qtd_pacotes"], errors="coerce"
+    ).fillna(0)
+    df_merged["qtd_insucesso"] = (
+        pd.to_numeric(df_merged.get("qtd_insucesso", 0), errors="coerce")
+        .fillna(0)
+        .astype(int)
     )
-    df_merged["valor_final"] = pd.to_numeric(
-        df_merged["valor_final"], errors="coerce"
+    df_merged["valor_final"] = (
+        pd.to_numeric(df_merged["valor_final"], errors="coerce")
+        .fillna(0.0)
+        .round(2)
     )
-    df_merged["valor_calculado"] = pd.to_numeric(
-        df_merged["valor_calculado"], errors="coerce"
+    df_merged["valor_calculado"] = (
+        pd.to_numeric(df_merged["valor_calculado"], errors="coerce")
+        .fillna(0.0)
+        .round(2)
     )
 
     df_agrupado = (
@@ -250,23 +292,25 @@ with aba_lancamento:
         .agg(
             Qtd_Rotas=("id", "count"),
             Total_Pacotes=("qtd_pacotes", "sum"),
-            Valor_Padrao=("valor_calculado", "sum"),
+            Total_Insucesso=("qtd_insucesso", "sum"),
             Valor_Total=("valor_final", "sum"),
         )
         .reset_index()
     )
 
+    df_agrupado["Valor_Total"] = df_agrupado["Valor_Total"].round(2)
     df_agrupado.columns = [
         "Motoboy",
         "Qtd. Rotas",
-        "Total Pacotes",
-        "Valor Padrão (R$)",
+        "Pacotes Saída",
+        "Insucessos",
         "Valor Total (R$)",
     ]
 
     m1, m2, m3 = st.columns(3)
     m1.metric(
-        "📦 Total de Pacotes do Dia", int(df_agrupado["Total Pacotes"].sum())
+        "📦 Total de Pacotes do Dia",
+        int(df_agrupado["Pacotes Saída"].sum() - df_agrupado["Insucessos"].sum()),
     )
     m2.metric(
         "💰 Total a Pagar no Dia",
@@ -281,10 +325,15 @@ with aba_lancamento:
         "🔍 Histórico detalhado / Excluir rota lançada incorretamente"
     ):
       for idx, row in df_merged.iterrows():
-        c1, c2, c3, c4, c5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
+        c1, c2, c3, c4, c5 = st.columns([0.25, 0.15, 0.2, 0.2, 0.2])
         c1.write(f"**{row['nome']}**")
         c2.write(f"🕒 {row.get('hora', '--:--')}")
-        c3.write(f"📦 {row['qtd_pacotes']} pct(s)")
+        insuc_txt = (
+            f" (Insucessos: {row['qtd_insucesso']})"
+            if row["qtd_insucesso"] > 0
+            else ""
+        )
+        c3.write(f"📦 {int(row['qtd_pacotes'])} pct(s){insuc_txt}")
         c4.write(f"💰 R$ {row['valor_final']:.2f}")
         if c5.button("🗑️ Excluir", key=f"del_rota_{row['id']}"):
           if deletar_rota(row["id"]):
@@ -363,10 +412,12 @@ with aba_fechamento:
   col_mes, col_ano = st.columns(2)
   with col_mes:
     mes = st.selectbox(
-        "Mês", list(range(1, 13)), index=datetime.now().month - 1
+        "Mês", list(range(1, 13)), index=datetime.now(FUSO_SP).month - 1
     )
   with col_ano:
-    ano = st.number_input("Ano", min_value=2024, value=datetime.now().year)
+    ano = st.number_input(
+        "Ano", min_value=2024, value=datetime.now(FUSO_SP).year
+    )
 
   prefixo_data = f"{ano}-{mes:02d}"
 
@@ -396,6 +447,7 @@ with aba_fechamento:
           )
           .reset_index()
       )
+      df_fechamento["Total_A_Pagar"] = df_fechamento["Total_A_Pagar"].round(2)
       df_fechamento.columns = ["Motoboy", "Total Pacotes", "Total A Pagar (R$)"]
 
       st.dataframe(df_fechamento, width="stretch")
