@@ -24,8 +24,10 @@ def ler_tabela(nome_aba):
 
 
 def salvar_tabela(nome_aba, df):
-  conn.update(worksheet=nome_aba, data=df)
-
+    try:
+        conn.update(worksheet=nome_aba, data=df)
+    except Exception:
+        conn.create(worksheet=nome_aba, data=df)
 
 # --- CARREGAR DADOS ---
 df_motoboys = ler_tabela("motoboys")
