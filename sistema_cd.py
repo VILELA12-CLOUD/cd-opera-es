@@ -12,8 +12,6 @@ PRECO_PADRAO_PACOTE = 1.80
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
-
-
 # --- FUNÇÕES DE LEITURA E ESCRITA NO GOOGLE SHEETS ---
 def ler_tabela(nome_aba):
   try:
