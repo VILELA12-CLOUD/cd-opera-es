@@ -21,8 +21,7 @@ def ler_tabela(nome_aba):
     if df is not None and not df.empty:
       return df.dropna(how="all")
     return pd.DataFrame()
-  except Exception as e:
-    st.warning(f"Aba '{nome_aba}' em inicialização ou sem dados.")
+  except Exception:
     return pd.DataFrame()
 
 
@@ -36,61 +35,38 @@ def salvar_tabela(nome_aba, df):
     st.cache_data.clear()
     return True
   except Exception as e:
-    st.error(
-        f"❌ Erro ao gravar na aba '{nome_aba}': {e}\n\n"
-        "Verifique se o e-mail do 'client_email' dos Secrets foi adicionado como"
-        " EDITOR no botão Compartilhar da planilha."
-    )
+    st.error(f"❌ Erro ao gravar na aba '{nome_aba}': {e}")
     return False
 
 
-# --- CARREGAR DADOS ---
-df_motoboys = ler_tabela("motoboys")
-df_lancamentos = ler_tabela("lancamentos")
-
-# Garantir colunas mínimas caso esteja vazia
-if df_motoboys.empty or "nome" not in df_motoboys.columns:
-  df_motoboys = pd.DataFrame(
-      columns=["id", "nome", "email", "telefone", "cnh", "placa", "ativo"]
-  )
-
-if df_lancamentos.empty or "motoboy_id" not in df_lancamentos.columns:
-  df_lancamentos = pd.DataFrame(
-      columns=[
-          "id",
-          "motoboy_id",
-          "data",
-          "qtd_pacotes",
-          "valor_calculado",
-          "valor_final",
-          "observacao",
-          "hora",
-      ]
-  )
-
-
-# --- FUNÇÕES DE SUPORTE ---
+# --- FUNÇÃO DE SUPORTE PARA OBTER MOTOBOYS ---
 def obter_motoboys(apenas_ativos=True):
-  if df_motoboys.empty:
+  df_m = ler_tabela("motoboys")
+  if df_m.empty or "nome" not in df_m.columns:
     return pd.DataFrame()
-  if apenas_ativos and "ativo" in df_motoboys.columns:
-    # Aceita variações do campo ativo (1, 1.0, True) para não ocultar cadastros
-    return df_motoboys[
-        df_motoboys["ativo"].astype(str).str.strip().isin(["1", "1.0", "True"])
-    ]
-  return df_motoboys
+
+  if apenas_ativos and "ativo" in df_m.columns:
+    # Garante a leitura de qualquer formato do campo 'ativo' (1, '1', 1.0, '1.0', True, 'True')
+    df_m["ativo_clean"] = (
+        df_m["ativo"].astype(str).str.strip().str.replace(".0", "", regex=False)
+    )
+    df_filtrado = df_m[df_m["ativo_clean"].isin(["1", "True"])]
+    return df_filtrado.drop(columns=["ativo_clean"])
+
+  return df_m
 
 
 def salvar_motoboy(nome, email, telefone, cnh, placa):
-  global df_motoboys
-  if not df_motoboys.empty and nome in df_motoboys["nome"].values:
-    st.warning("Já existe um motoboy cadastrado com este nome.")
-    return False
+  df_m = ler_tabela("motoboys")
+  if not df_m.empty and "nome" in df_m.columns:
+    if nome in df_m["nome"].values:
+      st.warning("Já existe um motoboy cadastrado com este nome.")
+      return False
 
   novo_id = (
       1
-      if df_motoboys.empty
-      else int(pd.to_numeric(df_motoboys["id"], errors="coerce").max()) + 1
+      if df_m.empty or "id" not in df_m.columns
+      else int(pd.to_numeric(df_m["id"], errors="coerce").max()) + 1
   )
   novo_registro = pd.DataFrame([{
       "id": str(novo_id),
@@ -102,18 +78,18 @@ def salvar_motoboy(nome, email, telefone, cnh, placa):
       "ativo": "1",
   }])
 
-  df_motoboys = pd.concat([df_motoboys, novo_registro], ignore_index=True)
-  sucesso = salvar_tabela("motoboys", df_motoboys)
-  return sucesso
+  df_atualizado = pd.concat([df_m, novo_registro], ignore_index=True)
+  return salvar_tabela("motoboys", df_atualizado)
 
 
 def obter_totais_dia_motoboy(motoboy_id, data_str):
-  if df_lancamentos.empty:
+  df_l = ler_tabela("lancamentos")
+  if df_l.empty or "motoboy_id" not in df_l.columns:
     return 0, 0.0, 0
 
-  df_filtrado = df_lancamentos[
-      (df_lancamentos["motoboy_id"].astype(str) == str(motoboy_id))
-      & (df_lancamentos["data"].astype(str) == data_str)
+  df_filtrado = df_l[
+      (df_l["motoboy_id"].astype(str) == str(motoboy_id))
+      & (df_l["data"].astype(str) == data_str)
   ]
 
   if df_filtrado.empty:
@@ -133,11 +109,11 @@ def obter_totais_dia_motoboy(motoboy_id, data_str):
 def adicionar_rota(
     motoboy_id, data_str, qtd_pacotes_nova_rota, valor_final_nova_rota, obs=""
 ):
-  global df_lancamentos
+  df_l = ler_tabela("lancamentos")
   novo_id = (
       1
-      if df_lancamentos.empty
-      else int(pd.to_numeric(df_lancamentos["id"], errors="coerce").max()) + 1
+      if df_l.empty or "id" not in df_l.columns
+      else int(pd.to_numeric(df_l["id"], errors="coerce").max()) + 1
   )
   valor_calc = qtd_pacotes_nova_rota * PRECO_PADRAO_PACOTE
   hora_atual = datetime.now().strftime("%H:%M:%S")
@@ -153,16 +129,16 @@ def adicionar_rota(
       "hora": str(hora_atual),
   }])
 
-  df_lancamentos = pd.concat([df_lancamentos, nova_rota], ignore_index=True)
-  return salvar_tabela("lancamentos", df_lancamentos)
+  df_atualizado = pd.concat([df_l, nova_rota], ignore_index=True)
+  return salvar_tabela("lancamentos", df_atualizado)
 
 
 def deletar_rota(rota_id):
-  global df_lancamentos
-  df_lancamentos = df_lancamentos[
-      df_lancamentos["id"].astype(str) != str(rota_id)
-  ]
-  return salvar_tabela("lancamentos", df_lancamentos)
+  df_l = ler_tabela("lancamentos")
+  if df_l.empty or "id" not in df_l.columns:
+    return False
+  df_atualizado = df_l[df_l["id"].astype(str) != str(rota_id)]
+  return salvar_tabela("lancamentos", df_atualizado)
 
 
 # --- INTERFACE PRINCIPAL ---
@@ -184,12 +160,12 @@ with aba_lancamento:
   data_str = str(data_hoje)
   data_br = data_hoje.strftime("%d/%m/%Y")
 
-  df_m = obter_motoboys()
+  df_m = obter_motoboys(apenas_ativos=True)
 
   if df_m.empty:
     st.warning(
-        "Nenhum motoboy cadastrado. Acesse a aba 'Cadastro de Motoboys'"
-        " primeiro."
+        "Nenhum motoboy cadastrado ou ativo. Acesse a aba 'Cadastro de"
+        " Motoboys' primeiro."
     )
   else:
     motoboy_selecionado = st.selectbox(
@@ -249,3 +225,197 @@ with aba_lancamento:
             f" {motoboy_selecionado}!"
         )
         st.rerun()
+
+  st.divider()
+  st.subheader(f"📋 Resumo Geral do Dia: {data_br}")
+
+  df_lancamentos = ler_tabela("lancamentos")
+  df_motoboys_todos = ler_tabela("motoboys")
+
+  if not df_lancamentos.empty and "data" in df_lancamentos.columns:
+    df_dia = df_lancamentos[df_lancamentos["data"].astype(str) == data_str]
+  else:
+    df_dia = pd.DataFrame()
+
+  if not df_dia.empty and not df_motoboys_todos.empty:
+    df_merged = df_dia.merge(
+        df_motoboys_todos,
+        left_on="motoboy_id",
+        right_on="id",
+        suffixes=("", "_mb"),
+    )
+    df_merged["qtd_pacotes"] = pd.to_numeric(
+        df_merged["qtd_pacotes"], errors="coerce"
+    )
+    df_merged["valor_final"] = pd.to_numeric(
+        df_merged["valor_final"], errors="coerce"
+    )
+    df_merged["valor_calculado"] = pd.to_numeric(
+        df_merged["valor_calculado"], errors="coerce"
+    )
+
+    df_agrupado = (
+        df_merged.groupby("nome")
+        .agg(
+            Qtd_Rotas=("id", "count"),
+            Total_Pacotes=("qtd_pacotes", "sum"),
+            Valor_Padrao=("valor_calculado", "sum"),
+            Valor_Total=("valor_final", "sum"),
+        )
+        .reset_index()
+    )
+
+    df_agrupado.columns = [
+        "Motoboy",
+        "Qtd. Rotas",
+        "Total Pacotes",
+        "Valor Padrão (R$)",
+        "Valor Total (R$)",
+    ]
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric(
+        "📦 Total de Pacotes do Dia", int(df_agrupado["Total Pacotes"].sum())
+    )
+    m2.metric(
+        "💰 Total a Pagar no Dia",
+        f"R$ {df_agrupado['Valor Total (R$)'].sum():.2f}",
+    )
+    m3.metric("🛵 Motoboys Ativos Hoje", len(df_agrupado))
+
+    st.write("##### Resumo Acumulado por Motoboy")
+    st.dataframe(df_agrupado, width="stretch")
+
+    with st.expander(
+        "🔍 Histórico detalhado / Excluir rota lançada incorretamente"
+    ):
+      for idx, row in df_merged.iterrows():
+        c1, c2, c3, c4, c5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
+        c1.write(f"**{row['nome']}**")
+        c2.write(f"🕒 {row.get('hora', '--:--')}")
+        c3.write(f"📦 {row['qtd_pacotes']} pct(s)")
+        c4.write(f"💰 R$ {row['valor_final']:.2f}")
+        if c5.button("🗑️ Excluir", key=f"del_rota_{row['id']}"):
+          if deletar_rota(row["id"]):
+            st.success("Rota excluída!")
+            st.rerun()
+        st.write("---")
+  else:
+    st.info("Nenhum lançamento efetuado para a data selecionada.")
+
+# -------------------------------------------------------------
+# ABA 2: CADASTRO DE MOTOBOYS
+# -------------------------------------------------------------
+with aba_cadastro:
+  st.subheader("Novo Cadastro")
+  with st.form("form_motoboy", clear_on_submit=True):
+    col1, col2 = st.columns(2)
+    with col1:
+      nome = st.text_input("Nome Completo*")
+      email = st.text_input("E-mail")
+      telefone = st.text_input("Telefone / WhatsApp")
+    with col2:
+      cnh = st.text_input("Número da CNH")
+      placa = st.text_input("Placa da Moto")
+
+    salvar = st.form_submit_button("Cadastrar Motoboy")
+    if salvar:
+      if nome.strip():
+        if salvar_motoboy(nome, email, telefone, cnh, placa):
+          st.success(f"Motoboy {nome} cadastrado e salvo na planilha!")
+          st.rerun()
+      else:
+        st.error("O campo Nome é obrigatório.")
+
+  st.divider()
+  st.subheader("Motoboys Cadastrados")
+  st.dataframe(obter_motoboys(apenas_ativos=False), width="stretch")
+
+# -------------------------------------------------------------
+# ABA 3: PROGRESSO & COMPARATIVOS
+# -------------------------------------------------------------
+with aba_progresso:
+  st.subheader("📈 Análise de Desempenho e Comparativos")
+  df_lancamentos = ler_tabela("lancamentos")
+  df_motoboys_todos = ler_tabela("motoboys")
+
+  if not df_lancamentos.empty and not df_motoboys_todos.empty:
+    try:
+      df_g = df_lancamentos.merge(
+          df_motoboys_todos, left_on="motoboy_id", right_on="id"
+      )
+      df_g["qtd_pacotes"] = pd.to_numeric(
+          df_g["qtd_pacotes"], errors="coerce"
+      )
+      df_g["data_formatada"] = pd.to_datetime(df_g["data"]).dt.strftime(
+          "%d/%m/%Y"
+      )
+
+      df_geral = (
+          df_g.groupby(["data_formatada", "nome"])["qtd_pacotes"]
+          .sum()
+          .reset_index()
+      )
+      df_geral.columns = ["Data", "Motoboy", "Pacotes"]
+
+      st.bar_chart(df_geral, x="Data", y="Pacotes", color="Motoboy")
+    except Exception:
+      st.info("Aguardando lançamentos para compor gráficos.")
+  else:
+    st.info("Ainda não há dados suficientes para gerar gráficos.")
+
+# -------------------------------------------------------------
+# ABA 4: FECHAMENTO DO MÊS
+# -------------------------------------------------------------
+with aba_fechamento:
+  st.subheader("🗓️ Fechamento Mensal para Pagamento")
+  col_mes, col_ano = st.columns(2)
+  with col_mes:
+    mes = st.selectbox(
+        "Mês", list(range(1, 13)), index=datetime.now().month - 1
+    )
+  with col_ano:
+    ano = st.number_input("Ano", min_value=2024, value=datetime.now().year)
+
+  prefixo_data = f"{ano}-{mes:02d}"
+
+  df_lancamentos = ler_tabela("lancamentos")
+  df_motoboys_todos = ler_tabela("motoboys")
+
+  if not df_lancamentos.empty and not df_motoboys_todos.empty:
+    df_mes = df_lancamentos[
+        df_lancamentos["data"].astype(str).str.startswith(prefixo_data)
+    ]
+    if not df_mes.empty:
+      df_f = df_mes.merge(
+          df_motoboys_todos, left_on="motoboy_id", right_on="id"
+      )
+      df_f["qtd_pacotes"] = pd.to_numeric(
+          df_f["qtd_pacotes"], errors="coerce"
+      )
+      df_f["valor_final"] = pd.to_numeric(
+          df_f["valor_final"], errors="coerce"
+      )
+
+      df_fechamento = (
+          df_f.groupby("nome")
+          .agg(
+              Total_Pacotes=("qtd_pacotes", "sum"),
+              Total_A_Pagar=("valor_final", "sum"),
+          )
+          .reset_index()
+      )
+      df_fechamento.columns = ["Motoboy", "Total Pacotes", "Total A Pagar (R$)"]
+
+      st.dataframe(df_fechamento, width="stretch")
+      csv = df_fechamento.to_csv(index=False).encode("utf-8")
+      st.download_button(
+          "📥 Baixar Relatório em CSV/Excel",
+          csv,
+          f"fechamento_{prefixo_data}.csv",
+          "text/csv",
+      )
+    else:
+      st.info(f"Sem dados registrados para o mês {mes:02d}/{ano}.")
+  else:
+    st.info(f"Sem dados registrados para o mês {mes:02d}/{ano}.")
