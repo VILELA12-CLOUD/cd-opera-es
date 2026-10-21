@@ -14,11 +14,10 @@ PRECO_PADRAO_PACOTE = 1.80
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 
-# --- FUNÇÕES DE LEITURA E ESCRITA COM CACHE PARA EVITAR ERRO 429 ---
+# --- FUNÇÕES DE LEITURA E ESCRITA ---
 def ler_tabela(nome_aba):
   try:
-    # ttl=5 mantém os dados atualizados a cada 5 segundos sem estourar o limite de 60 requisições/min do Google
-    df = conn.read(worksheet=nome_aba, ttl=5)
+    df = conn.read(worksheet=nome_aba, ttl=0)
     if df is not None and not df.empty:
       return df.dropna(how="all")
     return pd.DataFrame()
@@ -150,10 +149,6 @@ aba_lancamento, aba_cadastro, aba_progresso, aba_fechamento = st.tabs([
     "📅 Fechamento do Mês",
 ])
 
-# Carregamento centralizado dos dados
-df_lancamentos_geral = ler_tabela("lancamentos")
-df_motoboys_geral = ler_tabela("motoboys")
-
 # -------------------------------------------------------------
 # ABA 1: LANÇAMENTO DO DIA
 # -------------------------------------------------------------
@@ -164,6 +159,7 @@ with aba_lancamento:
   data_br = data_hoje.strftime("%d/%m/%Y")
 
   df_m = obter_motoboys(apenas_ativos=True)
+  df_lancamentos_geral = ler_tabela("lancamentos")
 
   if df_m.empty:
     st.warning(
@@ -197,9 +193,7 @@ with aba_lancamento:
       )
     with col2:
       valor_calc_rota = qtd_nova_rota * PRECO_PADRAO_PACOTE
-      st.metric(
-          "Valor da Rota (R$ 1,80/pct)", f"R$ {valor_calc_rota:.2f}"
-      )
+      st.metric("Valor da Rota (R$ 1,80/pct)", f"R$ {valor_calc_rota:.2f}")
     with col3:
       valor_final_rota = st.number_input(
           "Valor Final da Rota (Editável)",
@@ -223,14 +217,13 @@ with aba_lancamento:
       if adicionar_rota(
           motoboy_id, data_str, qtd_nova_rota, valor_final_rota, obs
       ):
-        st.success(
-            f"Rota de {qtd_nova_rota} pacotes adicionada para"
-            f" {motoboy_selecionado}!"
-        )
+        st.toast("✅ Rota adicionada com sucesso!")
         st.rerun()
 
   st.divider()
   st.subheader(f"📋 Resumo Geral do Dia: {data_br}")
+
+  df_motoboys_geral = ler_tabela("motoboys")
 
   if (
       not df_lancamentos_geral.empty
@@ -302,7 +295,7 @@ with aba_lancamento:
         c4.write(f"💰 R$ {row['valor_final']:.2f}")
         if c5.button("🗑️ Excluir", key=f"del_rota_{row['id']}"):
           if deletar_rota(row["id"]):
-            st.success("Rota excluída!")
+            st.toast("🗑️ Rota excluída!")
             st.rerun()
         st.write("---")
   else:
@@ -327,7 +320,7 @@ with aba_cadastro:
     if salvar:
       if nome.strip():
         if salvar_motoboy(nome, email, telefone, cnh, placa):
-          st.success(f"Motoboy {nome} cadastrado e salvo na planilha!")
+          st.toast(f"✅ Motoboy {nome} cadastrado com sucesso!")
           st.rerun()
       else:
         st.error("O campo Nome é obrigatório.")
@@ -341,6 +334,9 @@ with aba_cadastro:
 # -------------------------------------------------------------
 with aba_progresso:
   st.subheader("📈 Análise de Desempenho e Comparativos")
+  df_lancamentos_geral = ler_tabela("lancamentos")
+  df_motoboys_geral = ler_tabela("motoboys")
+
   if not df_lancamentos_geral.empty and not df_motoboys_geral.empty:
     try:
       df_g = df_lancamentos_geral.merge(
@@ -380,6 +376,9 @@ with aba_fechamento:
     ano = st.number_input("Ano", min_value=2024, value=datetime.now().year)
 
   prefixo_data = f"{ano}-{mes:02d}"
+
+  df_lancamentos_geral = ler_tabela("lancamentos")
+  df_motoboys_geral = ler_tabela("motoboys")
 
   if not df_lancamentos_geral.empty and not df_motoboys_geral.empty:
     df_mes = df_lancamentos_geral[
