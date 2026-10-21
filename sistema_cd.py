@@ -39,17 +39,15 @@ def salvar_tabela(nome_aba, df):
     return False
 
 
-# --- FUNÇÃO DE SUPORTE PARA OBTER MOTOBOYS ---
+# --- FUNÇÕES DE SUPORTE ---
 def obter_motoboys(apenas_ativos=True):
   df_m = ler_tabela("motoboys")
   if df_m.empty or "nome" not in df_m.columns:
     return pd.DataFrame()
 
-  # Se ativo existir e o filtro for ativado, remove apenas os que tiverem expressamente '0' ou 'False'
   if apenas_ativos and "ativo" in df_m.columns:
     ativo_str = df_m["ativo"].astype(str).str.strip().str.lower()
-    df_filtrado = df_m[~ativo_str.isin(["0", "false", "0.0"])]
-    return df_filtrado
+    return df_m[~ativo_str.isin(["0", "false", "0.0"])]
 
   return df_m
 
@@ -185,39 +183,35 @@ with aba_lancamento:
     st.write("---")
     st.write("#### ➕ Adicionar Nova Rota / Saída")
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-      qtd_nova_rota = st.number_input(
-          "Pacotes DESTA Rota", min_value=1, value=1, step=1
+    # USO DE FORMULÁRIO PARA EVITAR RECARRAGAMENTO PREMATURO
+    with st.form("form_rota", clear_on_submit=True):
+      col1, col2, col3 = st.columns(3)
+      with col1:
+        qtd_nova_rota = st.number_input(
+            "Pacotes DESTA Rota", min_value=1, value=1, step=1
+        )
+      with col2:
+        valor_calc_rota = qtd_nova_rota * PRECO_PADRAO_PACOTE
+        st.metric("Valor da Rota (R$ 1,80/pct)", f"R$ {valor_calc_rota:.2f}")
+      with col3:
+        valor_final_rota = st.number_input(
+            "Valor Final da Rota (Editável)",
+            min_value=0.0,
+            value=float(valor_calc_rota),
+            format="%.2f",
+        )
+
+      obs = st.text_input(
+          "Observação / Descrição da Rota (Ex: Rota 2 - Zona Sul, Bônus, etc.)"
       )
-    with col2:
-      valor_calc_rota = qtd_nova_rota * PRECO_PADRAO_PACOTE
-      st.metric("Valor da Rota (R$ 1,80/pct)", f"R$ {valor_calc_rota:.2f}")
-    with col3:
-      valor_final_rota = st.number_input(
-          "Valor Final da Rota (Editável)",
-          min_value=0.0,
-          value=float(valor_calc_rota),
-          format="%.2f",
-      )
+      btn_salvar_rota = st.form_submit_button("💾 Adicionar Rota")
 
-    novo_total_pacotes = pacotes_acumulados + qtd_nova_rota
-    novo_total_valor = valor_acumulado + valor_final_rota
-    st.caption(
-        f"📊 **Acumulado do dia após esta rota:** {novo_total_pacotes} pacotes"
-        f" | R$ {novo_total_valor:.2f}"
-    )
-
-    obs = st.text_input(
-        "Observação / Descrição da Rota (Ex: Rota 2 - Zona Sul, Bônus, etc.)"
-    )
-
-    if st.button("💾 Adicionar Rota"):
-      if adicionar_rota(
-          motoboy_id, data_str, qtd_nova_rota, valor_final_rota, obs
-      ):
-        st.toast("✅ Rota adicionada com sucesso!")
-        st.rerun()
+      if btn_salvar_rota:
+        if adicionar_rota(
+            motoboy_id, data_str, qtd_nova_rota, valor_final_rota, obs
+        ):
+          st.toast("✅ Rota adicionada com sucesso!")
+          st.rerun()
 
   st.divider()
   st.subheader(f"📋 Resumo Geral do Dia: {data_br}")
@@ -402,4 +396,17 @@ with aba_fechamento:
           )
           .reset_index()
       )
-      df_fechamento
+      df_fechamento.columns = ["Motoboy", "Total Pacotes", "Total A Pagar (R$)"]
+
+      st.dataframe(df_fechamento, width="stretch")
+      csv = df_fechamento.to_csv(index=False).encode("utf-8")
+      st.download_button(
+          "📥 Baixar Relatório em CSV/Excel",
+          csv,
+          f"fechamento_{prefixo_data}.csv",
+          "text/csv",
+      )
+    else:
+      st.info(f"Sem dados registrados para o mês {mes:02d}/{ano}.")
+  else:
+    st.info(f"Sem dados registrados para o mês {mes:02d}/{ano}.")
