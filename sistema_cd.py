@@ -1,7 +1,7 @@
-import sqlite3
 from datetime import datetime
 import pandas as pd
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -10,177 +10,138 @@ st.set_page_config(
 
 PRECO_PADRAO_PACOTE = 1.80
 
+# --- CONEXÃO COM GOOGLE SHEETS ---
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- BANCO DE DADOS (SQLite Local com atualização automática de schema) ---
-def init_db():
-  conn = sqlite3.connect("logistica_cd.db")
-  cursor = conn.cursor()
 
-  # Tabela de Motoboys
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS motoboys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT UNIQUE NOT NULL,
-            email TEXT,
-            telefone TEXT,
-            cnh TEXT,
-            placa TEXT,
-            ativo INTEGER DEFAULT 1
-        )
-    """)
-
-  # Tabela de Lançamentos por Rota
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS lancamentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            motoboy_id INTEGER,
-            data TEXT,
-            qtd_pacotes INTEGER,
-            valor_calculado REAL,
-            valor_final REAL,
-            observacao TEXT,
-            hora TEXT,
-            FOREIGN KEY (motoboy_id) REFERENCES motoboys (id)
-        )
-    """)
-
-  # Tenta adicionar a coluna 'hora' caso o banco venha da versão anterior
+# --- FUNÇÕES DE LEITURA E ESCRITA NO GOOGLE SHEETS ---
+def ler_tabela(nome_aba):
   try:
-    cursor.execute("ALTER TABLE lancamentos ADD COLUMN hora TEXT")
-  except sqlite3.OperationalError:
-    pass  # A coluna já existe, ignora o erro
-
-  conn.commit()
-  conn.close()
+    df = conn.read(worksheet=nome_aba, ttl=5)
+    return df.dropna(how="all")
+  except Exception:
+    return pd.DataFrame()
 
 
-init_db()
+def salvar_tabela(nome_aba, df):
+  conn.update(worksheet=nome_aba, data=df)
+
+
+# --- CARREGAR DADOS ---
+df_motoboys = ler_tabela("motoboys")
+df_lancamentos = ler_tabela("lancamentos")
+
+# Garantir colunas mínimas caso esteja vazia
+if df_motoboys.empty:
+  df_motoboys = pd.DataFrame(
+      columns=["id", "nome", "email", "telefone", "cnh", "placa", "ativo"]
+  )
+
+if df_lancamentos.empty:
+  df_lancamentos = pd.DataFrame(
+      columns=[
+          "id",
+          "motoboy_id",
+          "data",
+          "qtd_pacotes",
+          "valor_calculado",
+          "valor_final",
+          "observacao",
+          "hora",
+      ]
+  )
 
 
 # --- FUNÇÕES DE SUPORTE ---
 def obter_motoboys(apenas_ativos=True):
-  conn = sqlite3.connect("logistica_cd.db")
-  query = (
-      "SELECT id, nome, email, telefone, cnh, placa FROM motoboys WHERE ativo = 1"
-      if apenas_ativos
-      else "SELECT id, nome, email, telefone, cnh, placa, ativo FROM motoboys"
-  )
-  df = pd.read_sql_query(query, conn)
-  conn.close()
-  return df
+  if df_motoboys.empty:
+    return pd.DataFrame()
+  if apenas_ativos:
+    return df_motoboys[df_motoboys["ativo"] == 1]
+  return df_motoboys
 
 
 def salvar_motoboy(nome, email, telefone, cnh, placa):
-  conn = sqlite3.connect("logistica_cd.db")
-  cursor = conn.cursor()
-  try:
-    cursor.execute(
-        """
-            INSERT INTO motoboys (nome, email, telefone, cnh, placa)
-            VALUES (?, ?, ?, ?, ?)
-        """,
-        (nome, email, telefone, cnh, placa),
-    )
-    conn.commit()
-    sucesso = True
-  except sqlite3.IntegrityError:
-    sucesso = False
-  conn.close()
-  return sucesso
+  global df_motoboys
+  if not df_motoboys.empty and nome in df_motoboys["nome"].values:
+    return False
+
+  novo_id = (
+      1
+      if df_motoboys.empty
+      else int(pd.to_numeric(df_motoboys["id"]).max()) + 1
+  )
+  novo_registro = pd.DataFrame([{
+      "id": novo_id,
+      "nome": nome,
+      "email": email,
+      "telefone": telefone,
+      "cnh": cnh,
+      "placa": placa,
+      "ativo": 1,
+  }])
+
+  df_motoboys = pd.concat([df_motoboys, novo_registro], ignore_index=True)
+  salvar_tabela("motoboys", df_motoboys)
+  return True
 
 
 def obter_totais_dia_motoboy(motoboy_id, data_str):
-  conn = sqlite3.connect("logistica_cd.db")
-  cursor = conn.cursor()
-  cursor.execute(
-      """
-        SELECT SUM(qtd_pacotes), SUM(valor_final), COUNT(id)
-        FROM lancamentos 
-        WHERE motoboy_id = ? AND data = ?
-    """,
-      (motoboy_id, data_str),
+  if df_lancamentos.empty:
+    return 0, 0.0, 0
+
+  df_filtrado = df_lancamentos[
+      (df_lancamentos["motoboy_id"].astype(str) == str(motoboy_id))
+      & (df_lancamentos["data"] == data_str)
+  ]
+
+  if df_filtrado.empty:
+    return 0, 0.0, 0
+
+  total_pacotes = int(
+      pd.to_numeric(df_filtrado["qtd_pacotes"], errors="coerce").sum()
   )
-  res = cursor.fetchone()
-  conn.close()
-  total_pacotes = res[0] if res[0] is not None else 0
-  total_valor = res[1] if res[1] is not None else 0.0
-  total_rotas = res[2] if res[2] is not None else 0
+  total_valor = float(
+      pd.to_numeric(df_filtrado["valor_final"], errors="coerce").sum()
+  )
+  total_rotas = len(df_filtrado)
+
   return total_pacotes, total_valor, total_rotas
 
 
 def adicionar_rota(
     motoboy_id, data_str, qtd_pacotes_nova_rota, valor_final_nova_rota, obs=""
 ):
-  conn = sqlite3.connect("logistica_cd.db")
-  cursor = conn.cursor()
+  global df_lancamentos
+  novo_id = (
+      1
+      if df_lancamentos.empty
+      else int(pd.to_numeric(df_lancamentos["id"]).max()) + 1
+  )
   valor_calc = qtd_pacotes_nova_rota * PRECO_PADRAO_PACOTE
   hora_atual = datetime.now().strftime("%H:%M:%S")
 
-  cursor.execute(
-      """
-        INSERT INTO lancamentos (motoboy_id, data, qtd_pacotes, valor_calculado, valor_final, observacao, hora)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """,
-      (
-          motoboy_id,
-          data_str,
-          qtd_pacotes_nova_rota,
-          valor_calc,
-          valor_final_nova_rota,
-          obs,
-          hora_atual,
-      ),
-  )
+  nova_rota = pd.DataFrame([{
+      "id": novo_id,
+      "motoboy_id": motoboy_id,
+      "data": data_str,
+      "qtd_pacotes": qtd_pacotes_nova_rota,
+      "valor_calculado": valor_calc,
+      "valor_final": valor_final_nova_rota,
+      "observacao": obs,
+      "hora": hora_atual,
+  }])
 
-  conn.commit()
-  conn.close()
+  df_lancamentos = pd.concat([df_lancamentos, nova_rota], ignore_index=True)
+  salvar_tabela("lancamentos", df_lancamentos)
 
 
 def deletar_rota(rota_id):
-  conn = sqlite3.connect("logistica_cd.db")
-  cursor = conn.cursor()
-  cursor.execute("DELETE FROM lancamentos WHERE id = ?", (rota_id,))
-  conn.commit()
-  conn.close()
-
-
-def relatorio_diario_agrupado(data_str):
-  conn = sqlite3.connect("logistica_cd.db")
-  query = """
-        SELECT 
-            m.nome AS Motoboy, 
-            COUNT(l.id) AS "Qtd. Rotas",
-            SUM(l.qtd_pacotes) AS "Total Pacotes", 
-            SUM(l.valor_calculado) AS "Valor Padrão (R$)", 
-            SUM(l.valor_final) AS "Valor Total (R$)"
-        FROM lancamentos l
-        JOIN motoboys m ON l.motoboy_id = m.id
-        WHERE l.data = ?
-        GROUP BY m.id
-    """
-  df = pd.read_sql_query(query, conn, params=(data_str,))
-  conn.close()
-  return df
-
-
-def detalhe_rotas_dia(data_str):
-  conn = sqlite3.connect("logistica_cd.db")
-  query = """
-        SELECT 
-            l.id AS Rota_ID,
-            m.nome AS Motoboy,
-            COALESCE(l.hora, '--:--') AS "Hora Lançamento",
-            l.qtd_pacotes AS "Pacotes na Rota",
-            l.valor_final AS "Valor Rota (R$)",
-            l.observacao AS "Observação"
-        FROM lancamentos l
-        JOIN motoboys m ON l.motoboy_id = m.id
-        WHERE l.data = ?
-        ORDER BY l.id DESC
-    """
-  df = pd.read_sql_query(query, conn, params=(data_str,))
-  conn.close()
-  return df
+  global df_lancamentos
+  df_lancamentos = df_lancamentos[
+      df_lancamentos["id"].astype(str) != str(rota_id)
+  ]
+  salvar_tabela("lancamentos", df_lancamentos)
 
 
 # --- INTERFACE PRINCIPAL ---
@@ -200,6 +161,7 @@ with aba_lancamento:
   st.subheader("Registro de Pacotes por Rota")
   data_hoje = st.date_input("Data da Operação", datetime.now().date())
   data_str = str(data_hoje)
+  data_br = data_hoje.strftime("%d/%m/%Y")
 
   df_m = obter_motoboys()
 
@@ -223,8 +185,8 @@ with aba_lancamento:
     if total_rotas > 0:
       st.info(
           f"📌 **{motoboy_selecionado}** já possui **{total_rotas} rota(s)**"
-          f" registrada(s) hoje. Total acumulado: **{pacotes_acumulados}"
-          f" pacotes** (R$ {valor_acumulado:.2f})."
+          f" registrada(s) hoje ({data_br}). Total acumulado:"
+          f" **{pacotes_acumulados} pacotes** (R$ {valor_acumulado:.2f})."
       )
 
     st.write("---")
@@ -267,32 +229,64 @@ with aba_lancamento:
       st.rerun()
 
   st.divider()
-  st.subheader(f"📋 Resumo Geral do Dia: {data_str}")
+  st.subheader(f"📋 Resumo Geral do Dia: {data_br}")
 
-  df_dia = relatorio_diario_agrupado(data_str)
+  if not df_lancamentos.empty:
+    df_dia = df_lancamentos[df_lancamentos["data"] == data_str]
+  else:
+    df_dia = pd.DataFrame()
 
   if not df_dia.empty:
-    m1, m2, m3 = st.columns(3)
-    m1.metric("📦 Total de Pacotes do Dia", int(df_dia["Total Pacotes"].sum()))
-    m2.metric(
-        "💰 Total a Pagar no Dia", f"R$ {df_dia['Valor Total (R$)'].sum():.2f}"
+    df_merged = df_dia.merge(
+        df_motoboys, left_on="motoboy_id", right_on="id", suffixes=("", "_mb")
     )
-    m3.metric("🛵 Motoboys Ativos Hoje", len(df_dia))
+    df_merged["qtd_pacotes"] = pd.to_numeric(df_merged["qtd_pacotes"])
+    df_merged["valor_final"] = pd.to_numeric(df_merged["valor_final"])
+    df_merged["valor_calculado"] = pd.to_numeric(df_merged["valor_calculado"])
+
+    df_agrupado = (
+        df_merged.groupby("nome")
+        .agg(
+            Qtd_Rotas=("id", "count"),
+            Total_Pacotes=("qtd_pacotes", "sum"),
+            Valor_Padrao=("valor_calculado", "sum"),
+            Valor_Total=("valor_final", "sum"),
+        )
+        .reset_index()
+    )
+
+    df_agrupado.columns = [
+        "Motoboy",
+        "Qtd. Rotas",
+        "Total Pacotes",
+        "Valor Padrão (R$)",
+        "Valor Total (R$)",
+    ]
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric(
+        "📦 Total de Pacotes do Dia", int(df_agrupado["Total Pacotes"].sum())
+    )
+    m2.metric(
+        "💰 Total a Pagar no Dia",
+        f"R$ {df_agrupado['Valor Total (R$)'].sum():.2f}",
+    )
+    m3.metric("🛵 Motoboys Ativos Hoje", len(df_agrupado))
 
     st.write("##### Resumo Acumulado por Motoboy")
-    st.dataframe(df_dia, use_container_width=True)
+    st.dataframe(df_agrupado, use_container_width=True)
 
-    with st.expander("🔍 Histórico detalhado / Excluir rota lançada incorretamente"):
-      df_detalhe = detalhe_rotas_dia(data_str)
-      
-      for idx, row in df_detalhe.iterrows():
+    with st.expander(
+        "🔍 Histórico detalhado / Excluir rota lançada incorretamente"
+    ):
+      for idx, row in df_merged.iterrows():
         c1, c2, c3, c4, c5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
-        c1.write(f"**{row['Motoboy']}**")
-        c2.write(f"🕒 {row['Hora Lançamento']}")
-        c3.write(f"📦 {row['Pacotes na Rota']} pct(s)")
-        c4.write(f"💰 R$ {row['Valor Rota (R$)']:.2f}")
-        if c5.button("🗑️ Excluir", key=f"del_rota_{row['Rota_ID']}"):
-          deletar_rota(row['Rota_ID'])
+        c1.write(f"**{row['nome']}**")
+        c2.write(f"🕒 {row.get('hora', '--:--')}")
+        c3.write(f"📦 {row['qtd_pacotes']} pct(s)")
+        c4.write(f"💰 R$ {row['valor_final']:.2f}")
+        if c5.button("🗑️ Excluir", key=f"del_rota_{row['id']}"):
+          deletar_rota(row["id"])
           st.success("Rota excluída!")
           st.rerun()
         st.write("---")
@@ -334,19 +328,22 @@ with aba_cadastro:
 # -------------------------------------------------------------
 with aba_progresso:
   st.subheader("📈 Análise de Desempenho e Comparativos")
-  conn = sqlite3.connect("logistica_cd.db")
-  df_geral = pd.read_sql_query(
-      """
-        SELECT l.data AS Data, m.nome AS Motoboy, SUM(l.qtd_pacotes) AS Pacotes, SUM(l.valor_final) AS Valor
-        FROM lancamentos l JOIN motoboys m ON l.motoboy_id = m.id
-        GROUP BY l.data, m.id
-        ORDER BY l.data DESC
-    """,
-      conn,
-  )
-  conn.close()
+  if not df_lancamentos.empty and not df_motoboys.empty:
+    df_g = df_lancamentos.merge(
+        df_motoboys, left_on="motoboy_id", right_on="id"
+    )
+    df_g["qtd_pacotes"] = pd.to_numeric(df_g["qtd_pacotes"])
+    df_g["data_formatada"] = pd.to_datetime(df_g["data"]).dt.strftime(
+        "%d/%m/%Y"
+    )
 
-  if not df_geral.empty:
+    df_geral = (
+        df_g.groupby(["data_formatada", "nome"])["qtd_pacotes"]
+        .sum()
+        .reset_index()
+    )
+    df_geral.columns = ["Data", "Motoboy", "Pacotes"]
+
     st.bar_chart(df_geral, x="Data", y="Pacotes", color="Motoboy")
   else:
     st.info("Ainda não há dados suficientes para gerar gráficos.")
@@ -366,30 +363,34 @@ with aba_fechamento:
 
   prefixo_data = f"{ano}-{mes:02d}"
 
-  conn = sqlite3.connect("logistica_cd.db")
-  df_fechamento = pd.read_sql_query(
-      """
-        SELECT m.nome AS Motoboy, 
-               SUM(l.qtd_pacotes) AS Total_Pacotes, 
-               SUM(l.valor_final) AS Total_A_Pagar
-        FROM lancamentos l
-        JOIN motoboys m ON l.motoboy_id = m.id
-        WHERE l.data LIKE ?
-        GROUP BY m.id
-    """,
-      conn,
-      params=(f"{prefixo_data}%",),
-  )
-  conn.close()
+  if not df_lancamentos.empty and not df_motoboys.empty:
+    df_mês = df_lancamentos[
+        df_lancamentos["data"].astype(str).str.startswith(prefixo_data)
+    ]
+    if not df_mês.empty:
+      df_f = df_mês.merge(df_motoboys, left_on="motoboy_id", right_on="id")
+      df_f["qtd_pacotes"] = pd.to_numeric(df_f["qtd_pacotes"])
+      df_f["valor_final"] = pd.to_numeric(df_f["valor_final"])
 
-  if not df_fechamento.empty:
-    st.dataframe(df_fechamento, use_container_width=True)
-    csv = df_fechamento.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "📥 Baixar Relatório em CSV/Excel",
-        csv,
-        f"fechamento_{prefixo_data}.csv",
-        "text/csv",
-    )
+      df_fechamento = (
+          df_f.groupby("nome")
+          .agg(
+              Total_Pacotes=("qtd_pacotes", "sum"),
+              Total_A_Pagar=("valor_final", "sum"),
+          )
+          .reset_index()
+      )
+      df_fechamento.columns = ["Motoboy", "Total Pacotes", "Total A Pagar (R$)"]
+
+      st.dataframe(df_fechamento, use_container_width=True)
+      csv = df_fechamento.to_csv(index=False).encode("utf-8")
+      st.download_button(
+          "📥 Baixar Relatório em CSV/Excel",
+          csv,
+          f"fechamento_{prefixo_data}.csv",
+          "text/csv",
+      )
+    else:
+      st.info(f"Sem dados registrados para o mês {mes:02d}/{ano}.")
   else:
-    st.info(f"Sem dados registrados para o mês {mes}/{ano}.")
+    st.info(f"Sem dados registrados para o mês {mes:02d}/{ano}.")
